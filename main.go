@@ -133,7 +133,7 @@ func (g GitlabApp) createHooks() error {
 		url := robot.Host() + ROUTE_WEBHOOK
 		trueBool := true
 		skipInsecure := !robot.HttpClient().Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify
-		_, _, err = g.client.Projects.AddProjectHook(project.ID, &gitlab.AddProjectHookOptions{
+		_, resp, err := g.client.Projects.AddProjectHook(project.ID, &gitlab.AddProjectHookOptions{
 			URL: &url,
 			MergeRequestsEvents: &trueBool,
 			IssuesEvents: &trueBool,
@@ -141,13 +141,22 @@ func (g GitlabApp) createHooks() error {
 			PipelineEvents: &trueBool,
 			EnableSSLVerification: &skipInsecure,
 		})
+		if resp != nil && resp.StatusCode == 403 {
+			robot.Logger().Info("Skipping project %s because you don't have correct permission to create hook", project.Name)
+			robot.Store().Create(&GitlabHook{
+				ProjectID: project.ID,
+				ProjectName: project.NameWithNamespace,
+				Skipped: true,
+			})
+			continue
+		}
 		if err != nil {
 			listErr = append(listErr, err.Error())
 			continue
 		}
 		robot.Store().Create(&GitlabHook{
 			ProjectID: project.ID,
-			ProjectName: project.Name,
+			ProjectName: project.NameWithNamespace,
 		})
 	}
 	if len(listErr) > 0 {
@@ -196,7 +205,14 @@ func (g GitlabApp) cronHooks() {
 	}()
 }
 func (g GitlabApp) userWithPermissionFromProjects(notif GitlabNotification) ([]string, error) {
-	members, _, err := g.client.Projects.ListProjectMembers(notif.ProjectID, nil)
+	var members []*gitlab.ProjectMember
+	var err error
+	if notif.ProjectID != 0 {
+		members, _, err = g.client.Projects.ListProjectMembers(notif.ProjectID, nil)
+	} else {
+		members, _, err = g.client.Projects.ListProjectMembers(notif.GroupName + "/" + notif.ProjectName, nil)
+	}
+
 	if err != nil {
 		return []string{}, err
 	}
@@ -221,8 +237,22 @@ func (g GitlabApp) userWithPermissionFromProjects(notif GitlabNotification) ([]s
 	return mapToSliceString(users), nil
 }
 func (g GitlabApp) retrieveChatUser(username string) string {
+	if username == "" {
+		return username
+	}
 	if _, ok := g.conf.GitlabUsersMap[username]; ok {
 		return g.conf.GitlabUsersMap[username]
+	}
+	return username
+}
+func (g GitlabApp) retrieveGitlabUser(username string) string {
+	if username == "" {
+		return username
+	}
+	for usernameGitlab, _ := range g.conf.GitlabUsersMap {
+		if usernameGitlab == username {
+			return usernameGitlab
+		}
 	}
 	return username
 }

@@ -24,6 +24,7 @@ func (g GitlabApp) incomingWebhook(w http.ResponseWriter, req *http.Request) {
 		robot.Logger().Error("Incoming gitlab webhook: %s", err.Error())
 		return
 	}
+	robot.Logger().Info("Webhook received type: " + gitlabEvent.ObjectKind)
 	switch gitlabEvent.ObjectKind {
 	case MERGE_REQUEST_EVENT_NAME:
 		g.notifyMergeRequest(b)
@@ -52,7 +53,8 @@ func (g GitlabApp) notifyPipelineFailed(webhook []byte) {
 	}
 	notif := &GitlabNotification{
 		ProjectID: pipelineEvent.ObjectAttributes.ID,
-		ProjectName: pipelineEvent.Project.PathWithNamespace,
+		ProjectName: pipelineEvent.Project.Name,
+		GroupName: pipelineEvent.Project.Namespace,
 		Type: PIPELINE_EVENT_NAME,
 		ObjectId: pipelineEvent.ObjectAttributes.ID,
 		ChannelName: g.conf.GitlabNotifyChannel,
@@ -78,7 +80,8 @@ func (g GitlabApp) notifyBuildFailed(webhook []byte) {
 	}
 	notif := &GitlabNotification{
 		ProjectID: buildEvent.ProjectID,
-		ProjectName: buildEvent.Repository.PathWithNamespace,
+		ProjectName: buildEvent.Repository.Name,
+		GroupName: buildEvent.Repository.Namespace,
 		Type: BUILD_EVENT_NAME,
 		ObjectId: buildEvent.BuildID,
 		ChannelName: g.conf.GitlabNotifyChannel,
@@ -107,6 +110,7 @@ func (g GitlabApp) notifyIssue(webhook []byte) {
 		ChannelName: g.conf.GitlabNotifyChannel,
 		WebUrl: issueEvent.ObjectAttributes.URL,
 		ProjectUrl: issueEvent.Project.Homepage,
+		AssignedUser: g.retrieveGitlabUser(issueEvent.Assignee.Username),
 	}
 	if issueEvent.ObjectAttributes.State == "closed" {
 		var count int
@@ -147,6 +151,7 @@ func (g GitlabApp) notifyMergeRequest(webhook []byte) {
 		ChannelName: g.conf.GitlabNotifyChannel,
 		WebUrl: mergeEvent.ObjectAttributes.URL,
 		ProjectUrl: mergeEvent.Project.Homepage,
+		AssignedUser: g.retrieveGitlabUser(mergeEvent.Assignee.Username),
 	}
 	state := mergeEvent.ObjectAttributes.State
 	if state == "closed" || state == "merged" {
@@ -174,15 +179,26 @@ func (g GitlabApp) notifyWithSave(notif *GitlabNotification) {
 	if g.isFilteredRepo(notif.ProjectName) {
 		return
 	}
-	var count int
-	robot.Store().Model(&GitlabNotification{}).Where(notif).Count(&count)
-	if count > 0 {
+	var dbNotif GitlabNotification
+	robot.Store().Model(&GitlabNotification{}).Where(&GitlabNotification{
+		ProjectID: notif.ProjectID,
+		ObjectId: notif.ObjectId,
+		Type: notif.Type,
+		ChannelName: notif.ChannelName,
+	}).First(&dbNotif)
+	if dbNotif.ID == 0 {
+		robot.Store().Create(notif)
+	} else {
+		dbNotif.AssignedUser = notif.AssignedUser
+		robot.Store().Save(dbNotif)
 		return
 	}
-	robot.Store().Create(notif)
 	g.notify(notif)
 }
 func (g GitlabApp) notify(notif *GitlabNotification) {
+	if notif.AssignedUser != "" {
+		return
+	}
 	users, err := g.userWithPermissionFromProjects(*notif)
 	if err != nil {
 		robot.Logger().Error("Error when notifying: %s", err.Error())

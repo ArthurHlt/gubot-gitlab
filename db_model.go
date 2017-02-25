@@ -6,6 +6,7 @@ type GitlabHook struct {
 	gorm.Model
 	ProjectID   int
 	ProjectName string
+	Skipped     bool
 }
 
 type GitlabNotification struct {
